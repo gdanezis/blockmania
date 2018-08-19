@@ -309,7 +309,7 @@ class StateAnnotator(object):
                         
                         # Deliver
                         if (nid, xround) not in state["final"]: 
-                            # Deliver only once
+                            # Deliver only once, and store meta-data
                             state["final"][(nid, xround)] = xid
 
                             # TODO: clean up all state related to this (nid, xround)
@@ -429,7 +429,7 @@ class StateAnnotator(object):
                     self.row[self.max_row] = set()                
 
             # print(self.max_row, self.row[self.max_row])
-            print("%s(%s) Deliver final: (%s, %s): %s (at block: %s view: %s mem: %s full:%s)%s" % (CSTART, receiver, nid, xround, final_xid, orig_block[1], viewn, c, self.max_row, CEND))
+            # print("%s(%s) Deliver final: (%s, %s): %s (at block: %s view: %s mem: %s full:%s)%s" % (CSTART, receiver, nid, xround, final_xid, orig_block[1], viewn, c, self.max_row, CEND))
 
 
 class Node(object):
@@ -446,6 +446,10 @@ class Node(object):
         
         self.sa = StateAnnotator([0, 1, 2, 3])
         self.faulty = False
+        self.net = None
+
+    def set_net(self, net):
+        self.net = net
 
     def run(self):
         while True:
@@ -454,7 +458,7 @@ class Node(object):
             # Seal a new block
             idx = binascii.hexlify(os.urandom(16))
             block = Block(self.nid, self.block, idx, self.received, self.env.now)
-            net.broadcast(self, block)
+            self.net.broadcast(self, block)
             self.block += 1
 
             # Always include a link to the previous block
@@ -507,7 +511,7 @@ class Network(object):
 
     def send(self, n, block, delay=None):
         if delay is None:
-            delay = random.expovariate(1.0/NETWORK_DELAY)
+            delay = NETWORK_DELAY + random.expovariate(10.0/NETWORK_DELAY)
         yield self.env.timeout(delay)
         n.getBlock(block)
 
@@ -517,29 +521,27 @@ class Network(object):
             if from_n.faulty:
                 continue
             if nx.nid != from_n.nid:
-                env.process(self.send(nx, block))
+                self.env.process(self.send(nx, block))
             else:
-                env.process(self.send(nx, block, 0.0))
+                self.env.process(self.send(nx, block, 0.0))
 
-
-
-
-if __name__ == "__main__":
-    random.seed(12)
-    BLOCK_JITTER = 0.5002 # 0.2
-    NETWORK_DELAY = 0.5
-    BLOCK_INTERVAL = 2.0
-
+def simulation_driver(rand_seed = 12, ticks=100, faulty=None):
+    random.seed(rand_seed)
     env = simpy.Environment()
     nodes = [Node(env, nid) for nid in range(4)]
-    # nodes[3].faulty = True
+
+    if faulty:
+        for ft in faulty:
+            nodes[ft].faulty = True
+    
     sender = Client(env, nodes)
     net = Network(env, nodes)
+    _ = [n.set_net (net) for n in nodes]
 
-    env.run(until=100)
+    env.run(until=ticks)
+    return nodes
 
-    # Now make a nice picture from the annotation.
-
+def depict(nodes, fname ="nodes", target=(3,2), trace_start = None, trace_end = None):
     state = nodes[0].sa.block_states
     blocks = nodes[0].blockstore.store
 
@@ -548,17 +550,21 @@ if __name__ == "__main__":
 
 
 
-    TRACE_N = 3
-    TRACE_R = 2
+    TRACE_N , TRACE_R = target  
 
     target = nodes[0].sa.final[(TRACE_N, TRACE_R)]
 
 
     pic_blocks = set()
-    with open('nodes.tex', 'w') as f:
+    with open('%s.tex' % fname, 'w') as f:
+
+        if trace_start  == None:
+            trace_start = TRACE_R   
+        if trace_end == None:
+            trace_end = TRACE_R + 4
 
         all_ticks = []
-        for bnum in range(TRACE_R, TRACE_R+4):
+        for bnum in range(trace_start , trace_end ):
             for bid in blocks:
                 if bid[1] == bnum:
                     pic_blocks.add(bid)
@@ -599,6 +605,8 @@ if __name__ == "__main__":
                 c = "black"
 
             print("\\node [transition,text=red,line width=0.01mm] (%s)    at (%2.2f,%2.2f) [draw] {%s};" % (bname(bid[2]), (blocks[bid].ticks)*2, (1+bid[0])*4, T), file=f)
+            # \node [above right, magenta] at (.5,.75) {above right};
+            print("\\node [above right =0.1cm of %s] (L%s) {%d};" % (bname(bid[2]), bname(bid[2]), bid[1] ), file=f)
             if Tm != "":
                 print("\\node [ellipse,minimum height=0.1cm,minimum width=0.1cm,draw=red,below=0.1cm of %s,text=red,line width=0.01mm] (X%s) {%s};" % (bname(bid[2]), bname(bid[2]), Tm), file=f)
 
@@ -619,3 +627,88 @@ if __name__ == "__main__":
 
                     #if c == "black" or item.id[0] == binc[0]:
                     print("\\draw[->,%s,line width=0.05mm] (%s) edge node{} (%s);" % (c, bname(item.id[2]), bname(binc[2])), file=f)
+
+
+def latency_graph():
+    data = {}
+    for net_delay in range(1, 10):
+        for rnd in range(5):
+            NETWORK_DELAY = net_delay * 1.0
+            if NETWORK_DELAY not in data:
+                data[NETWORK_DELAY] = []
+
+            nodes = simulation_driver(rand_seed = 100+net_delay + rnd )
+            # compute delay for target
+            state = nodes[0].sa.block_states
+            final = nodes[0].sa.final
+
+            key = (0, 10, final[(0, 10)])
+            delay = 100
+
+            for x in range(100):
+                if (0, x) not in final:
+                    continue
+
+                other_keys = (0, x, final[(0, x)])
+
+                if other_keys in state:
+                    if "final" in state[other_keys]:
+                        if (0, 10) in state[other_keys]["final"]:
+                            delay = x
+                            del nodes
+                            break
+            print ("Latency: %s Delay: %s" % (NETWORK_DELAY, delay - 10))
+            data[NETWORK_DELAY] += [ delay-10 ]
+    
+    # Data serties
+    X = list(sorted(data))
+    Ymean = [float(sum(data[x]))/len(data[x]) for x in X]
+    Ymin = [mn - min(data[x]) for x, mn in zip(X,Ymean) ] 
+    Ymax = [max(data[x]) - mn for x, mn in zip(X, Ymean)]
+    for x, ymn, ymx in zip(X, Ymin, Ymax):
+        print(x, ymn, ymx) 
+
+    import matplotlib.pyplot as plt
+    from matplotlib import rcParams
+    rcParams['figure.figsize'] = 8, 4
+
+    plt.xlabel("Network latency (ticks)")
+    plt.ylabel("Decision latency (blocks)")
+    plt.grid()
+
+    plt.errorbar(X, Ymean, [Ymin, Ymax], marker = "o", mfc = "k", ls="--", color = '0.50')
+    plt.tight_layout()
+
+    plt.savefig("latency.pdf", dpi=300)
+
+def figure1():
+    BLOCK_JITTER = 0.002 # 0.2
+    NETWORK_DELAY = 0.5
+    BLOCK_INTERVAL = 2.0
+
+    # Now make a nice picture from the annotation.
+    # Main picture
+    nodes = simulation_driver()
+    depict(nodes, fname ="nodesFIG1")
+
+def figureNV():
+    BLOCK_JITTER = 0.002 # 0.2
+    NETWORK_DELAY = 0.5
+    BLOCK_INTERVAL = 2.0
+
+    # Make a graph of network delay vs. block delay
+    nodes = simulation_driver(faulty=[3])
+    depict(nodes, fname ="nodesNV", trace_start = 12, trace_end = 16)
+
+
+if __name__ == "__main__":
+    BLOCK_JITTER = 0.002 # 0.2
+    NETWORK_DELAY = 0.5
+    BLOCK_INTERVAL = 2.0
+
+    figure1()
+    figureNV()
+
+
+
+    
