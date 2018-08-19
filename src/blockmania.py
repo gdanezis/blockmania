@@ -10,9 +10,10 @@ from collections import defaultdict
 class Block(object):
     """ Represent a block sent by a node """
 
-    def __init__(self, nid, xround, xid, payload=()):
+    def __init__(self, nid, xround, xid, payload=(), ticks=None):
         self.id = (nid, xround, xid)
         self.payload = tuple(payload)
+        self.ticks = ticks
 
     def prev_block(self):
         _, xround, _ = self.id
@@ -157,7 +158,7 @@ class StateAnnotator(object):
         # Detect all timeouts
         if xround in state["timeouts"]:
             for (to_nid, to_round, to_view) in state["timeouts"][xround]:
-                if (to_nid, to_round, "final") not in state:
+                if (to_nid, to_round) not in self.final:
 
                     # Get the current view_n for this block
                     current_v = 0
@@ -452,7 +453,7 @@ class Node(object):
 
             # Seal a new block
             idx = binascii.hexlify(os.urandom(16))
-            block = Block(self.nid, self.block, idx, self.received)
+            block = Block(self.nid, self.block, idx, self.received, self.env.now)
             net.broadcast(self, block)
             self.block += 1
 
@@ -521,16 +522,100 @@ class Network(object):
                 env.process(self.send(nx, block, 0.0))
 
 
+
+
 if __name__ == "__main__":
     random.seed(12)
-    BLOCK_JITTER = 0.001 # 0.2
-    NETWORK_DELAY = 5.0
+    BLOCK_JITTER = 0.5002 # 0.2
+    NETWORK_DELAY = 0.5
     BLOCK_INTERVAL = 2.0
 
     env = simpy.Environment()
     nodes = [Node(env, nid) for nid in range(4)]
-    nodes[3].faulty = True
+    # nodes[3].faulty = True
     sender = Client(env, nodes)
     net = Network(env, nodes)
 
-    env.run(until=500)
+    env.run(until=100)
+
+    # Now make a nice picture from the annotation.
+
+    state = nodes[0].sa.block_states
+    blocks = nodes[0].blockstore.store
+
+    def bname(bid):
+        return "B"+str(bid)[4:14]
+
+
+
+    TRACE_N = 3
+    TRACE_R = 2
+
+    target = nodes[0].sa.final[(TRACE_N, TRACE_R)]
+
+
+    pic_blocks = set()
+    with open('nodes.tex', 'w') as f:
+
+        all_ticks = []
+        for bnum in range(TRACE_R, TRACE_R+4):
+            for bid in blocks:
+                if bid[1] == bnum:
+                    pic_blocks.add(bid)
+                    all_ticks += [ blocks[bid].ticks ]
+
+
+        minx = min(all_ticks)
+        maxx = max(all_ticks)
+
+        for nx in nodes:
+            print("\\draw[line width=0.01mm] (%2.2f,%2.2f) node[left] {Node $%s$} -- (%2.2f,%2.2f);" % ((minx-1)*2, (nx.nid+1)*4, nx.nid, (maxx+1)*2, (nx.nid+1)*4), file=f)
+
+        for bid in pic_blocks:
+            # print(bid, blocks[bid].ticks)
+            # define text
+
+            T = ""
+            Tm = ""
+            if (TRACE_N, TRACE_R, "v") in state[bid]:
+                v = state[bid][(TRACE_N, TRACE_R, "v")]
+            else:
+                v = 0
+
+            if (TRACE_N, TRACE_R, v, target) in state[bid]:
+                pp, cm = state[bid][(TRACE_N, TRACE_R, v, target)]
+                T = "v:%s p:%d c:%d" % (v, len(pp), len(cm))
+            if (TRACE_N, TRACE_R) in state[bid]["final"]:
+                T = "Deliv."
+
+            out = state[bid]["messages"]
+            out = [ o[0] for o in out if o[1:3] == (TRACE_N, TRACE_R) ] 
+            print(out)
+
+            Tm = ""
+            c = "gray"
+            if len(out) > 0:
+                Tm = ",".join(out)
+                c = "black"
+
+            print("\\node [transition,text=red,line width=0.01mm] (%s)    at (%2.2f,%2.2f) [draw] {%s};" % (bname(bid[2]), (blocks[bid].ticks)*2, (1+bid[0])*4, T), file=f)
+            if Tm != "":
+                print("\\node [ellipse,minimum height=0.1cm,minimum width=0.1cm,draw=red,below=0.1cm of %s,text=red,line width=0.01mm] (X%s) {%s};" % (bname(bid[2]), bname(bid[2]), Tm), file=f)
+
+        for binc in pic_blocks:
+            for item in blocks[binc].payload:
+                if type(item) == Block and item.id in pic_blocks: # Its a block
+                    # print(binc, item.id)
+
+                    out = state[item.id]["messages"]
+                    out = [ o[0] for o in out if o[1:3] == (TRACE_N, TRACE_R) ] 
+                    #print(out)
+
+                    T = ""
+                    c = "black!20"
+                    if len(out) > 0:
+                        T = ",".join(out)
+                        c = "black"
+
+                    #if c == "black" or item.id[0] == binc[0]:
+                    print("\\draw[->,%s,line width=0.05mm] (%s) edge node{} (%s);" % (c, bname(item.id[2]), bname(binc[2])), file=f)
