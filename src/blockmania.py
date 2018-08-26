@@ -15,6 +15,12 @@ class Block(object):
         self.payload = tuple(payload)
         self.ticks = ticks
 
+        # Set the max_height
+        self.max_height = max(0, xround)
+        for item in payload:
+            if type(item) == Block:
+                self.max_height = max(self.max_height, item.max_height)
+
     def prev_block(self):
         _, xround, _ = self.id
         if xround == 0:
@@ -109,12 +115,16 @@ class StateAnnotator(object):
         """ Define the set of nodes over which to get consensus. """
         self.node_ids = node_ids
         self.block_states = {}
+        self.block_states_log = {}
         self.final = {}
 
         self.row = {}
         self.max_row = 0
 
         self.trace = set([(3, 102)])
+
+        # Keep track of latest full height
+        self.next_height = 0
 
 
     def process_block(self, block):
@@ -127,6 +137,7 @@ class StateAnnotator(object):
             state["delay"] = {}
             state["timeouts"] = defaultdict(list) # map int -> struct
 
+        state["block"] = block
         self.block_states[block.id] = state
 
         # Make prepropose for received block
@@ -189,7 +200,7 @@ class StateAnnotator(object):
 
         # Process messages from other blocks.
         for item in block.payload:
-            if type(item) == Block:
+            if type(item) == Block and item.max_height >= self.next_height:
                 other_nid, _, _ = item.id
                 block_state = self.block_states[item.id]
                 messages = block_state[ "messages" ]
@@ -197,6 +208,14 @@ class StateAnnotator(object):
                 out += self._process_messages(state, other_nid, nid, block.id,  messages)
 
         state[ "messages" ] = out
+
+        # Garbage collect the states that are no more needed.
+        for K in list(self.block_states):
+            if self.block_states[K]["block"].max_height < self.next_height:
+                del self.block_states[K]
+
+        # This is a side-store for vizualization -- not for production
+        self.block_states_log[block.id] = self.block_states[block.id]
 
     def _process_messages(self, state, other_nid, nid, bid, messages):
         out = []
@@ -323,9 +342,16 @@ class StateAnnotator(object):
 
                             self.deliver(nid, xround, xid, receiver, orig_block, v, state)
 
-
                         if (nid, xround) not in self.final:
                             self.final[(nid, xround)] = xid
+
+                            # Check whether we have the full round
+                            while all((xnid, self.next_height) in self.final for xnid in self.node_ids):
+                                self.next_height += 1
+
+                            # Garbage collect all previous blocks
+
+
                         else:
                             # Check consensus
                             assert self.final[(nid, xround)] == xid
@@ -406,6 +432,7 @@ class StateAnnotator(object):
 
         # Compute size stats:
         c = len(state)
+        d = len(self.block_states)
 
         if final_xid != None:
             CSTART = '\033[94m' # green
@@ -429,7 +456,7 @@ class StateAnnotator(object):
                     self.row[self.max_row] = set()                
 
             # print(self.max_row, self.row[self.max_row])
-            # print("%s(%s) Deliver final: (%s, %s): %s (at block: %s view: %s mem: %s full:%s)%s" % (CSTART, receiver, nid, xround, final_xid, orig_block[1], viewn, c, self.max_row, CEND))
+            print("%s(%s) Deliver final: (%s, %s): %s (at block: %s view: %s mem: %s/%s full:%s)%s" % (CSTART, receiver, nid, xround, final_xid, orig_block[1], viewn, c, d, self.max_row, CEND))
 
 
 class Node(object):
@@ -542,7 +569,7 @@ def simulation_driver(rand_seed = 12, ticks=100, faulty=None):
     return nodes
 
 def depict(nodes, fname ="nodes", target=(3,2), trace_start = None, trace_end = None):
-    state = nodes[0].sa.block_states
+    state = nodes[0].sa.block_states_log
     blocks = nodes[0].blockstore.store
 
     def bname(bid):
